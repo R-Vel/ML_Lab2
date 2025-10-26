@@ -1,91 +1,164 @@
-# ============================================
-# model.py — Train and Export Full Pipeline
-# ============================================
-
-import pandas as pd
 import numpy as np
-import joblib
+import pandas as pd
+from sklearn.base import BaseEstimator, ClassifierMixin
 from sklearn.preprocessing import OneHotEncoder
 from sklearn.compose import ColumnTransformer
 from sklearn.ensemble import RandomForestClassifier
-from sklearn.pipeline import Pipeline
+from imblearn.pipeline import Pipeline as imb_pipeline
+from imblearn.over_sampling import SMOTENC
 
 
-def train_and_save_model(train_path='train.csv', output_path='new_model.joblib'):
+class WhiteBox(BaseEstimator, ClassifierMixin):
     """
-    Trains the risk-level model and saves it as a joblib pipeline.
+    WhiteBox classifier for newborn health risk prediction.
+    
+    This model uses Random Forest with SMOTENC for handling imbalanced data.
+    Best hyperparameters from tuning:
+    - k_neighbors: 3
+    - n_estimators: 100
+    - max_depth: 3
+    - min_samples_split: 10
+    - min_samples_leaf: 4
     """
-    print("🚀 Loading training data...")
-    df = pd.read_csv(train_path)
-
-    # ----------- Define feature types -----------
-    numerical_features = [
-        'gestational_age_weeks', 'birth_weight_kg', 'birth_length_cm',
-        'birth_head_circumference_cm', 'age_days', 'weight_kg', 'length_cm',
-        'head_circumference_cm', 'temperature_c', 'heart_rate_bpm', 'respiratory_rate_bpm',
-        'oxygen_saturation', 'feeding_frequency_per_day', 'urine_output_count',
-        'stool_count', 'jaundice_level_mg_dl'
-    ]
-
-    categorical_features = ['feeding_type']
-    binary_features = ['gender', 'immunizations_done', 'reflexes_normal']
-
-    # ----------- Features & target -----------
-    X = df.drop(columns=['risk_level'])
-    y = df['risk_level'].replace({'Healthy': 0, 'At Risk': 1})
-
-    # ----------- Preprocessing -----------
-    preprocessor = ColumnTransformer(
-        transformers=[
-            ('num', 'passthrough', numerical_features),
-            ('cat', OneHotEncoder(handle_unknown='ignore'), categorical_features),
-            ('bin', OneHotEncoder(drop='if_binary', handle_unknown='ignore'), binary_features)
+    
+    def __init__(self, 
+                 threshold: float = 0.5):
+        """
+        Initialize class, preprocessor, and random forest model
+        
+        Parameters
+        ----------
+        threshold (float): Decision threshold for probability (default=0.5)
+        """
+        self.threshold = threshold
+        
+        # Feature definitions
+        self.numerical_features = [
+            'weight_kg', 'length_cm', 'head_circumference_cm', 
+            'temperature_c', 'heart_rate_bpm', 'respiratory_rate_bpm',
+            'oxygen_saturation', 'jaundice_level_mg_dl',
+            'age_days', 'feeding_frequency_per_day',
+            'urine_output_count', 'stool_count'
         ]
-    )
+        
+        self.categorical_features = [
+            'feeding_type', 'gender', 'immunizations_done', 'reflexes_normal'
+        ]
+        
+        # Initialize preprocessor
+        self.preprocessor = ColumnTransformer(
+            transformers=[
+                ('num', 'passthrough', self.numerical_features),
+                ('cat', OneHotEncoder(drop="if_binary"), self.categorical_features),
+            ]
+        )
+        
+        # Initialize Random Forest with best hyperparameters
+        self.model = RandomForestClassifier(
+            n_estimators=100,
+            max_depth=3,
+            min_samples_split=10,
+            min_samples_leaf=4,
+            random_state=42
+        )
+        
+        # Pipeline will be created during fit
+        self.pipeline = None
+        self.is_fitted_ = False
+    
+    def fit(self,
+        X: Union[np.ndarray, pd.DataFrame],
+        y: Union[np.ndarray, pd.Series]
+    ):
+        """
+        Fit the model using a training X and y.
 
-    # ----------- Model -----------
-    model = RandomForestClassifier(
-        n_estimators=100, random_state=42, class_weight='balanced'
-    )
-
-    # ----------- Pipeline -----------
-    pipeline = Pipeline(steps=[
-        ('preprocessor', preprocessor),
-        ('model', model)
-    ])
-
-    # ----------- Train -----------
-    print("🧠 Training model...")
-    pipeline.fit(X, y)
-
-    # ----------- Save -----------
-    joblib.dump(pipeline, output_path)
-    print(f"✅ Model pipeline saved as '{output_path}'")
-
-
-def predict_from_file(model_path='new_model.joblib', test_path='test.csv', output_path='model_output.csv'):
-    """
-    Loads a saved model and predicts on a test CSV.
-    """
-    print("📦 Loading model...")
-    pipeline = joblib.load(model_path)
-
-    print("📄 Loading test data...")
-    test_df = pd.read_csv(test_path)
-
-    print("🔮 Predicting...")
-    preds = pipeline.predict(test_df)
-    label_map = {0: 'Healthy', 1: 'At Risk'}
-    test_df['predicted_risk_level'] = [label_map[p] for p in preds]
-
-    test_df.to_csv(output_path, index=False)
-    print(f"🎉 Predictions saved to '{output_path}'")
-
-
-# ----------- Script Entry Point -----------
-if __name__ == '__main__':
-    # Train model and save
-    train_and_save_model()
-
-    # Optional: immediately test predictions after training
-    # predict_from_file()
+        Parameters:
+        -----------
+        X (np.ndarray | pd.DataFrame): The training data
+        y (np.ndarray | pd.Sereis): The corresponding targets
+        """
+        
+        # Fit preprocessor first to get categorical indices
+        self.preprocessor.fit(X)
+        
+        # Get feature count after preprocessing
+        feature_names_out = self.preprocessor.get_feature_names_out()
+        numerical_count = len(self.numerical_features)
+        cat_transformer = self.preprocessor.named_transformers_['cat']
+        categorical_count = len(cat_transformer.get_feature_names_out())
+        
+        # Categorical indices for SMOTENC
+        cat_indices = list(range(
+            numerical_count, 
+            numerical_count + categorical_count
+        ))
+        
+        # Create pipeline with SMOTENC
+        self.pipeline = imb_pipeline([
+            ("preprocessor", self.preprocessor),
+            ("smote", SMOTENC(
+                categorical_features=cat_indices,
+                k_neighbors=3,
+                random_state=42
+            )),
+            ("clf", self.model)
+        ])
+        
+        # Fit the pipeline
+        self.pipeline.fit(X, y)
+        self.is_fitted_ = True
+        
+        return self
+    
+    def predict(self, X):
+        """Predict the outcome from data X given threshold."""
+        if not self.is_fitted_:
+            raise ValueError("Model must be fitted before calling predict")
+        
+        # Get probabilities and threshold
+        proba = self.predict_proba(X)[:, 1]
+        predictions = (proba >= self.threshold).astype(int)
+        
+        return predictions
+    
+    def fit_predict(self, X, y):
+        """
+        Fit the model using a training X and y, and predict the outcome using
+        X. Note that this would give the predicted labels during training.
+        """
+        return self.fit(X, y).predict(X)
+    
+    def predict_proba(self, X):
+        "Return probabilities per class"
+        if not self.is_fitted_:
+            raise ValueError("Model must be fitted before calling predict_proba")
+        
+        return self.pipeline.predict_proba(X)
+        
+    def get_feature_importance(self):
+        """
+        Get feature importances from the trained Random Forest.
+        
+        Returns
+        -------
+        importance_df : pd.DataFrame
+            DataFrame with features and their importance scores
+        """
+        if not self.is_fitted_:
+            raise ValueError("Model must be fitted before getting feature importance")
+        
+        # Get feature names after preprocessing
+        feature_names = self.preprocessor.get_feature_names_out()
+        
+        # Get feature importances from the classifier
+        clf = self.pipeline.named_steps['clf']
+        importances = clf.feature_importances_
+        
+        # Create DataFrame
+        importance_df = pd.DataFrame({
+            'Feature': feature_names,
+            'Importance': importances
+        }).sort_values(by='Importance', ascending=False)
+        
+        return importance_df
