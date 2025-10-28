@@ -47,12 +47,15 @@ class WhiteBox(BaseEstimator, ClassifierMixin):
         self.categorical_features = [
             'feeding_type', 'gender', 'immunizations_done', 'reflexes_normal'
         ]
+
+        self.all_features = self.numerical_features + self.categorical_features
+        self.old_cat_indices = [self.all_features.index(feat) for feat in self.categorical_features]
         
         # Initialize preprocessor
         self.preprocessor = ColumnTransformer(
             transformers=[
                 ('num', 'passthrough', self.numerical_features),
-                ('cat', OneHotEncoder(drop="if_binary", handle_unknown="ignore"), self.categorical_features),
+                ('cat', OneHotEncoder(drop="if_binary"), self.categorical_features),
             ]
         )
         
@@ -148,63 +151,6 @@ class WhiteBox(BaseEstimator, ClassifierMixin):
             raise ValueError("Model must be fitted before calling predict_proba")
         
         return self.pipeline.predict_proba(X)
-    
-    def _explain_instance(self, random_person: pd.DataFrame):
-        """
-        Show LIME Explainer for a certain instance.
-        
-        Args:
-            random_person (pd.DataFrame): A single row DataFrame containing the instance to explain.
-        """
-        if not self.is_fitted_:
-            raise ValueError("Model must be fitted before explaining instances")
-            
-        # Get preprocessor and classifier from pipeline
-        preprocessor = self.pipeline.named_steps['preprocessor']
-        clf = self.pipeline.named_steps['clf']
-        
-        # Create feature names list combining numerical and one-hot encoded categorical features
-        categorical_feature_names = []
-        for i, feature in enumerate(self.categorical_features):
-            encoder = preprocessor.named_transformers_['cat']
-            categories = encoder.categories_[i]
-            categorical_feature_names.extend([f"{feature}_{val}" for val in categories])
-            
-        feature_names = self.numerical_features + categorical_feature_names
-        
-        # Initialize LIME explainer with the training data
-        transformed_training_data = preprocessor.transform(self._X)
-        # Convert to dense array if sparse
-        if hasattr(transformed_training_data, 'toarray'):
-            transformed_training_data = transformed_training_data.toarray()
-            
-        explainer = LimeTabularExplainer(
-            training_data=transformed_training_data,
-            feature_names=feature_names,
-            class_names=['Normal', 'At Risk'],
-            mode='classification',
-            # Specify which features are categorical after one-hot encoding
-            categorical_features=list(range(
-                len(self.numerical_features),
-                len(feature_names)
-            ))
-        )
-        
-        # One-hot encode instance
-        transformed_instance = preprocessor.transform(random_person)
-        if hasattr(transformed_instance, 'toarray'):
-            transformed_instance = transformed_instance.toarray()
-        transformed_instance = transformed_instance[0]
-        
-        # Generate the explanation
-        explanation = explainer.explain_instance(
-            data_row=transformed_instance,
-            predict_fn=clf.predict_proba,
-            num_features=len(feature_names),
-            top_labels=1
-        )
-        
-        return explanation
         
     def _get_feature_importance(self):
         """
@@ -229,4 +175,36 @@ class WhiteBox(BaseEstimator, ClassifierMixin):
         
         return importance_df
 
-    
+    def _explain_instance(self, 
+                          random_person: Union[np.ndarray, pd.DataFrame]):
+        """
+        Show LIME Explainer for a certain instance
+        
+        Parameters:
+        -----------
+        random_person (np.ndarray | pd.Sereis | pd.DataFrame): Specific instance or row
+        """
+
+        if not self.is_fitted_:
+            raise ValueError("Model must be fitted before getting LIME")
+
+        # Convert instance to DataFrame if needed
+        if isinstance(random_person, pd.DataFrame):
+           random_person = random_person.values[0]
+        
+        lime_explainer = LimeTabularExplainer(
+            training_data=self._X.values,   # raw data
+            feature_names=self.all_features,
+            categorical_features=self.old_cat_indices,
+            class_names=["Healthy", "At Risk"], # This corresponds to class labels [0, 1]
+            mode="classification",
+            random_state = 42
+        )
+        
+        # select a random instance 
+        explained_inst = lime_explainer.explain_instance(
+            data_row=random_person,
+            predict_fn=self.pipeline.predict_proba 
+        )
+
+        return explained_inst
